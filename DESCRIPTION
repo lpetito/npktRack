@@ -1,0 +1,27 @@
+Package: npktRack
+Type: Package
+Title: Nonparametric Kernel Tracking Indices (RTP/RTPR)
+Version: 0.1.0
+Authors@R: c(
+    person("Abigail", "Gauen", email="abbygauen@g.harvard.edu", role = c("aut", "cre")),
+    person("Ngoc", "Duong", role="aut"),
+    person("Lucia", "Petito", email="lucia.petito@northwestern.edu", role = "aut")
+    )
+Description: Functions to estimate local and global rank-tracking probabilities (RTP) and
+    rank-tracking probability ratios (RTPR) for longitudinal binary outcomes using
+    kernel smoothing and subject-level bootstrap.
+Depends: R (>= 4.0.0)
+Imports:
+    dplyr,
+    future,
+    future.apply,
+    future.callr,
+    ggplot2,
+    parallel,
+    stats
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
+
