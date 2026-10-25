@@ -12,12 +12,17 @@
 #' @param tmax Maximum time in the domain over which to estimate tracking (end of grid).
 #' @param grid Spacing of the time grid between \code{tmin} and \code{tmax}
 #'   (same units as \code{t}); RTP/RTPR will be evaluated at \code{seq(tmin, tmax, by = grid)}.
-#' @param delta Numeric vector of positive lag times (same units as \code{t})
+#' @param delta Numeric vector of positive lead times (same units as \code{t})
 #'   at which to evaluate tracking, e.g. \code{c(1, 2, 3, 4)}.
 #' @param b Kernel bandwidth (same units as \code{t}); controls smoothing in both
 #'   1D (marginal) and 2D (joint) kernel estimates.
 #' @param nboot Number of subject-level bootstrap resamples to use for
 #'   uncertainty quantification. The first iteration uses the original data.
+#' @param workers Optional number of parallel workers. If \code{NULL} (default),
+#'   \code{npktRack()} uses whatever \code{future::plan()} you have set
+#'   (sequential unless you set one). If a positive integer, a temporary
+#'   \code{future::multisession} plan with that many workers is used for this
+#'   call only, and your previous plan is restored afterwards.
 #'
 #' @details
 #' The function implements nonparametric kernel estimators of:
@@ -31,6 +36,15 @@
 #' }
 #' Estimation uses Epanechnikov kernels with subject-level weighting, and
 #' subject-level bootstrap to obtain percentile confidence intervals.
+#'
+#' The time grid plus the largest lag must stay within the observed times,
+#' i.e. \code{tmin >= min(t)} and \code{tmax + max(delta) <= max(t)}.
+#'
+#' @section Parallel computing:
+#' Bootstrap resamples are run with \pkg{future.apply}, so you control
+#' parallelism. Either set a plan before calling the function, e.g.
+#' \code{future::plan(future::multisession, workers = 4)}, or pass
+#' \code{workers = 4}. By default the function runs sequentially.
 #'
 #' @return
 #' A list with components:
@@ -50,7 +64,7 @@
 #' }
 #'
 #' @examples
-#' \dontrun{
+#' \donttest{
 #' set.seed(123)
 #' id  <- rep(1:100, each = 5)
 #' age <- rep(seq(5, 13, by = 2), times = 100)
@@ -60,14 +74,19 @@
 #'   id    = id,
 #'   t     = age,
 #'   y     = y,
-#'   tmin  = 5,
-#'   tmax  = 11,
-#'   grid  = 2,
-#'   delta = c(2, 4),
-#'   b     = 2,
+#'   tmin  = 5,        # tmin = minimum observed age
+#'   tmax  = 9,        # tmax + max(delta) = 13 = oldest observed age
+#'   grid  = 2,        # grid = 2-yr intervals (i.e. 5, 7, 9)
+#'   delta = c(2, 4),  # delta = 2- and 4-year lead times
+#'   b     = 2,        # bandwidth = 2
 #'   nboot = 50
 #' )
+#' res$mrtp
 #' res$grtp
+#'
+#' # Optional: run the bootstrap in parallel with 2 workers
+#' # res <- npktRack(id, age, y, tmin = 5, tmax = 9, grid = 2,
+#' #                 delta = c(2, 4), b = 2, nboot = 200, workers = 2)
 #' }
 #'
 #' @export
@@ -79,11 +98,18 @@ npktRack <- function(id,
                      grid,
                      delta,
                      b,
-                     nboot) {
+                     nboot,
+                     workers = NULL) {
 
   ##------- parallel setup -------##
-  workers <- max(1L, parallel::detectCores() - 1L)
-  future::plan(future.callr::callr, workers = workers)
+  ## Respect the user's future::plan(); only override it (temporarily) if
+  ## 'workers' is supplied, and always restore the previous plan on exit.
+  if (!is.null(workers)) {
+    if (!is.numeric(workers) || length(workers) != 1L || workers < 1)
+      stop("workers must be NULL or a single positive integer.")
+    oplan <- future::plan(future::multisession, workers = as.integer(workers))
+    on.exit(future::plan(oplan), add = TRUE)
+  }
 
   ##------- kernels -------##
   Kh <- function(x, b) {
@@ -165,17 +191,25 @@ npktRack <- function(id,
     X2  <- X[idx]
     TT2 <- TT[idx]
     dt  <- diff(TT2)
-    avg_h <- (head(X2, -1) + tail(X2, -1)) / 2
+    avg_h <- (utils::head(X2, -1) + utils::tail(X2, -1)) / 2
     sum(avg_h * dt) / sum(dt)
   }
 
   ## ------ checks -------- ##
+  if (length(id) != length(t) || length(t) != length(y))
+    stop("id, t and y must have the same length.")
+  if (anyNA(id) || anyNA(t) || anyNA(y))
+    stop("id, t and y must not contain missing values.")
   if (!all(y %in% c(0, 1))) stop("Outcome y must be strictly binary (0/1).")
+  if (any(delta <= 0)) stop("All delta values must be positive.")
   if (tmin >= tmax) stop("tmin must be less than tmax.")
   if (tmin < min(t) || (tmax + max(delta)) > max(t))
-    stop("t-range plus max(delta) must lie inside observed time domain.")
-  if (grid > min(delta)) stop("grid must be smaller than min(delta).")
-  if (any(delta <= 0)) stop("All delta values must be positive.")
+    stop(sprintf(paste0(
+      "t-range plus max(delta) must lie inside the observed time domain ",
+      "[%g, %g]: need tmin >= %g and tmax + max(delta) <= %g, ",
+      "but tmax + max(delta) = %g."),
+      min(t), max(t), min(t), max(t), tmax + max(delta)))
+  if (grid > min(delta)) stop("grid must be smaller than or equal to min(delta).")
   if (nboot < 2L) stop("nboot must be at least 2 to compute bootstrap CIs.")
 
   ## ------ organize inputs -------- ##
@@ -267,12 +301,15 @@ npktRack <- function(id,
     future.seed = TRUE
   )
 
-  future::plan(future::sequential)
-
   bootRTP   <- lapply(results, `[[`, "RTP")
   bootRTPR  <- lapply(results, `[[`, "RTPR")
-  bootmRTP  <- t(sapply(results, `[[`, "mRTP"))
-  bootmRTPR <- t(sapply(results, `[[`, "mRTPR"))
+  ## nboot x length(delta) matrices. Built with matrix(byrow = TRUE) rather
+  ## than t(sapply(...)), which collapses to a 1 x nboot matrix when there
+  ## is only one delta.
+  bootmRTP  <- matrix(unlist(lapply(results, `[[`, "mRTP")),
+                      nrow = nboot, ncol = length(delta), byrow = TRUE)
+  bootmRTPR <- matrix(unlist(lapply(results, `[[`, "mRTPR")),
+                      nrow = nboot, ncol = length(delta), byrow = TRUE)
 
   ## RTP output
   rtp.array <- array(
@@ -283,9 +320,9 @@ npktRack <- function(id,
   RTP2 <- list(
     rtp     = as.data.frame(bootRTP[[1]]),
     rtp.lci = as.data.frame(apply(rtp.array[, , -1, drop = FALSE],
-                                  c(1, 2), quantile, probs = 0.025, na.rm = TRUE)),
+                                  c(1, 2), stats::quantile, probs = 0.025, na.rm = TRUE)),
     rtp.uci = as.data.frame(apply(rtp.array[, , -1, drop = FALSE],
-                                  c(1, 2), quantile, probs = 0.975, na.rm = TRUE))
+                                  c(1, 2), stats::quantile, probs = 0.975, na.rm = TRUE))
   )
 
   RTP2[["rtpci"]] <- as.data.frame(
@@ -309,9 +346,9 @@ npktRack <- function(id,
   RTPR2 <- list(
     rtpr     = as.data.frame(bootRTPR[[1]]),
     rtpr.lci = as.data.frame(apply(rtpr.array[, , -1, drop = FALSE],
-                                   c(1, 2), quantile, probs = 0.025, na.rm = TRUE)),
+                                   c(1, 2), stats::quantile, probs = 0.025, na.rm = TRUE)),
     rtpr.uci = as.data.frame(apply(rtpr.array[, , -1, drop = FALSE],
-                                   c(1, 2), quantile, probs = 0.975, na.rm = TRUE))
+                                   c(1, 2), stats::quantile, probs = 0.975, na.rm = TRUE))
   )
 
   RTPR2[["rtprci"]] <- as.data.frame(
@@ -339,14 +376,14 @@ npktRack <- function(id,
   mRTP2 <- data.frame(
     delta      = delta,
     mRTP       = bootmRTP[1, ],
-    mRTP.lci   = apply(bootmRTP[-1, , drop = FALSE],  2, quantile,
+    mRTP.lci   = apply(bootmRTP[-1, , drop = FALSE],  2, stats::quantile,
                        prob = 0.025, na.rm = TRUE),
-    mRTP.uci   = apply(bootmRTP[-1, , drop = FALSE],  2, quantile,
+    mRTP.uci   = apply(bootmRTP[-1, , drop = FALSE],  2, stats::quantile,
                        prob = 0.975, na.rm = TRUE),
     mRTPR      = bootmRTPR[1, ],
-    mRTPR.lci  = apply(bootmRTPR[-1, , drop = FALSE], 2, quantile,
+    mRTPR.lci  = apply(bootmRTPR[-1, , drop = FALSE], 2, stats::quantile,
                        prob = 0.025, na.rm = TRUE),
-    mRTPR.uci  = apply(bootmRTPR[-1, , drop = FALSE], 2, quantile,
+    mRTPR.uci  = apply(bootmRTPR[-1, , drop = FALSE], 2, stats::quantile,
                        prob = 0.975, na.rm = TRUE)
   )
 
@@ -374,7 +411,8 @@ npktRack <- function(id,
     gRTP.uci  = stats::quantile(gRTP[-1],  prob = 0.975, na.rm = TRUE),
     gRTPR     = gRTPR[1],
     gRTPR.lci = stats::quantile(gRTPR[-1], prob = 0.025, na.rm = TRUE),
-    gRTPR.uci = stats::quantile(gRTPR[-1], prob = 0.975, na.rm = TRUE)
+    gRTPR.uci = stats::quantile(gRTPR[-1], prob = 0.975, na.rm = TRUE),
+    row.names = NULL
   )
 
   gRTP2$gRTPci <- sprintf(
@@ -439,14 +477,23 @@ npktRack <- function(id,
   rownames(n.y10)  <- delta
 
   ## plots
+  ## lines only make sense with 2+ lags; with a single delta just show points
+  geom_line_if <- function(...) {
+    if (length(delta) > 1L) ggplot2::geom_line(...) else NULL
+  }
   mrtp_plot <- ggplot2::ggplot(mRTP2,
                                ggplot2::aes(x = delta, y = mRTP)) +
-    ggplot2::geom_line() +
-    ggplot2::geom_line(
+    geom_line_if() +
+    ggplot2::geom_point() +
+    (if (length(delta) == 1L)
+      ggplot2::geom_errorbar(
+        ggplot2::aes(ymin = mRTP.lci, ymax = mRTP.uci), width = 0.02
+      )) +
+    geom_line_if(
       ggplot2::aes(y = mRTP.lci),
       linetype = 2
     ) +
-    ggplot2::geom_line(
+    geom_line_if(
       ggplot2::aes(y = mRTP.uci),
       linetype = 2
     ) +
@@ -469,12 +516,17 @@ npktRack <- function(id,
 
   mrtpr_plot <- ggplot2::ggplot(mRTP2,
                                 ggplot2::aes(x = delta, y = mRTPR)) +
-    ggplot2::geom_line() +
-    ggplot2::geom_line(
+    geom_line_if() +
+    ggplot2::geom_point() +
+    (if (length(delta) == 1L)
+      ggplot2::geom_errorbar(
+        ggplot2::aes(ymin = mRTPR.lci, ymax = mRTPR.uci), width = 0.02
+      )) +
+    geom_line_if(
       ggplot2::aes(y = mRTPR.lci),
       linetype = 2
     ) +
-    ggplot2::geom_line(
+    geom_line_if(
       ggplot2::aes(y = mRTPR.uci),
       linetype = 2
     ) +
@@ -510,3 +562,11 @@ npktRack <- function(id,
     mrtpr_plot = mrtpr_plot
   )
 }
+
+## Column names used inside dplyr/ggplot2 non-standard evaluation; declared
+## here so R CMD check does not flag them as undefined global variables.
+utils::globalVariables(c(
+  "id", "boot", "has_t1", "has_t2", "mRTP", "mRTP.lci", "mRTP.uci",
+  "mRTPR", "mRTPR.lci", "mRTPR.uci", "mRTPci", "mRTPRci",
+  "gRTPci", "gRTPRci"
+))

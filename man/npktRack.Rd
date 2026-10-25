@@ -4,7 +4,7 @@
 \alias{npktRack}
 \title{Nonparametric kernel-based tracking estimands (RTP/RTPR)}
 \usage{
-npktRack(id, t, y, tmin, tmax, grid, delta, b, nboot)
+npktRack(id, t, y, tmin, tmax, grid, delta, b, nboot, workers = NULL)
 }
 \arguments{
 \item{id}{Vector of subject identifiers (character or coercible to character).}
@@ -29,6 +29,12 @@ at which to evaluate tracking, e.g. \code{c(1, 2, 3, 4)}.}
 
 \item{nboot}{Number of subject-level bootstrap resamples to use for
 uncertainty quantification. The first iteration uses the original data.}
+
+\item{workers}{Optional number of parallel workers. If \code{NULL} (default),
+\code{npktRack()} uses whatever \code{future::plan()} you have set
+(sequential unless you set one). If a positive integer, a temporary
+\code{future::multisession} plan with that many workers is used for this
+call only, and your previous plan is restored afterwards.}
 }
 \value{
 A list with components:
@@ -64,9 +70,20 @@ mRTP/mRTPR over the lag domain \code{delta}
 }
 Estimation uses Epanechnikov kernels with subject-level weighting, and
 subject-level bootstrap to obtain percentile confidence intervals.
+
+The time grid plus the largest lag must stay within the observed times,
+i.e. \code{tmin >= min(t)} and \code{tmax + max(delta) <= max(t)}.
 }
+\section{Parallel computing}{
+
+Bootstrap resamples are run with \pkg{future.apply}, so you control
+parallelism. Either set a plan before calling the function, e.g.
+\code{future::plan(future::multisession, workers = 4)}, or pass
+\code{workers = 4}. By default the function runs sequentially.
+}
+
 \examples{
-\dontrun{
+\donttest{
 set.seed(123)
 id  <- rep(1:100, each = 5)
 age <- rep(seq(5, 13, by = 2), times = 100)
@@ -77,13 +94,18 @@ res <- npktRack(
   t     = age,
   y     = y,
   tmin  = 5,
-  tmax  = 11,
+  tmax  = 9,      # tmax + max(delta) = 13 = oldest observed age
   grid  = 2,
   delta = c(2, 4),
   b     = 2,
   nboot = 50
 )
+res$mrtp
 res$grtp
+
+# Optional: run the bootstrap in parallel with 2 workers
+# res <- npktRack(id, age, y, tmin = 5, tmax = 9, grid = 2,
+#                 delta = c(2, 4), b = 2, nboot = 200, workers = 2)
 }
 
 }
